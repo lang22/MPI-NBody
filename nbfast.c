@@ -9,6 +9,7 @@
 
 #include<GLFW/glfw3.h>
 
+//Macros to use 1D arrays with ease
 #define PX(i) (3*i+1)
 #define PY(i) (3*i+2)
 #define MASS(i) (3*i+3)
@@ -18,24 +19,35 @@
 #define AX(i) (4*i+2)
 #define AY(i) (4*i+3)
 
+//Gravitational constant
 double G=0.0001;
+//Fixed delta t
 double dt=0.005;
+//Barnes Hut critical distance
 double rcutoff=0.35;
+
+//To avoid almost infinity values in force calculation
 double rlimit=0.03;
 
+//Nodes of the Barnes Hut Quadtree
 struct Node{
     struct Node *children[4];
     int external;
-
+	
+	//Center of Mass cordinates
     double CMX;
     double CMY;
     double mass;
+
+	//Top right corner coordinates
     double TRX;
     double TRY;
 
+	//Lower left corner coordinates
     double LLX;
     double LLY;
 
+	//Geometrical center, tradeoff of space for speed
     double GCX;
     double GCY;
 };
@@ -48,10 +60,12 @@ void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n){
         node->mass=shrdBuff[MASS(indexes[0])];
     } else {
         node->external=0;
+		//Arrays that will hold the indexes of the particles in each node
         int *NEi = (int *) malloc(sizeof(int)*n);
         int *NWi = (int *) malloc(sizeof(int)*n);
         int *SWi = (int *) malloc(sizeof(int)*n);
         int *SEi = (int *) malloc(sizeof(int)*n);
+		//Counter for those particles
         int NWc=0, SWc=0,SEc=0, NEc=0;
 
         int i;
@@ -74,7 +88,7 @@ void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n){
                 }
             }
         }
-        if(NEc>0){
+        if(NEc>0){ //There are particles in the NE node
             node->children[0]= malloc(sizeof *node->children[0]);
             node->children[0]->TRX=node->TRX;
             node->children[0]->TRY=node->TRY;
@@ -82,6 +96,7 @@ void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n){
             node->children[0]->LLY=node->GCY;
             node->children[0]->GCX=(node->GCX+node->TRX)/2;
             node->children[0]->GCY=(node->GCY+node->TRY)/2;
+			//Recursively call the build Tree function in the children nodes
             buildTree(node->children[0],shrdBuff,NEi,NEc);
         } else {
             node->children[0]=NULL;
@@ -125,8 +140,10 @@ void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n){
         node->mass=0;
         node->CMX=0;
         node->CMY=0;
+		//Now that every children node has been created, we calculate the center of Mass
+		//And total mass of the node
         for(i=0;i<4;i++){
-            if(node->children[i]!=NULL){
+         	   if(node->children[i]!=NULL){
                 node->mass+=node->children[i]->mass;
                 node->CMX+=node->children[i]->CMX*node->children[i]->mass;
                 node->CMY+=node->children[i]->CMY*node->children[i]->mass;
@@ -140,7 +157,7 @@ void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n){
 void calculateForce(struct Node *tree, double *shrdBuff, double *localBuff, int index){
     double distance = sqrt((tree->CMX-shrdBuff[PX(index)])*(tree->CMX-shrdBuff[PX(index)])+
                            (tree->CMY-shrdBuff[PY(index)])*(tree->CMY-shrdBuff[PY(index)]));
-    if(distance>0){
+    if(distance>0){ //To avoid self interactions
         if(distance>rcutoff || tree->external){
             double f;
             if(distance<rlimit){
@@ -148,9 +165,11 @@ void calculateForce(struct Node *tree, double *shrdBuff, double *localBuff, int 
             } else {
                 f=G*tree->mass/(distance*distance*distance);
             }
+			//Projection of the acceleration in the x direction
             localBuff[AX(index)]+=f*(tree->CMX-shrdBuff[PX(index)]);
+			//And in the y direction
             localBuff[AY(index)]+=f*(tree->CMY-shrdBuff[PY(index)]);
-        } else {
+        } else { //The node is too close to the particle, recursively check each node
             int i;
             for(i=0;i<4;i++){
                 if(tree->children[i]!=NULL){
@@ -162,6 +181,7 @@ void calculateForce(struct Node *tree, double *shrdBuff, double *localBuff, int 
 }
 
 void moveParticle(double *shrdBuff, double *localBuff, int index){
+	//Really simple euler method to advance in time
     double oldX=shrdBuff[PX(index)];
     double oldY=shrdBuff[PY(index)];
     shrdBuff[PX(index)]+=localBuff[VX(index)]*dt+localBuff[AX(index)]*dt*dt*0.5;
@@ -170,6 +190,7 @@ void moveParticle(double *shrdBuff, double *localBuff, int index){
     localBuff[VY(index)]=(shrdBuff[PY(index)]-oldY)/dt;
 }
 
+//OpenGL Function
 void drawParticle(double *shrdBuff, double *radius, int index){
     glBegin(GL_TRIANGLE_FAN);
     int k;
@@ -181,6 +202,7 @@ void drawParticle(double *shrdBuff, double *radius, int index){
     glEnd();
 }
 
+//OpenGL Function
 void drawBarnesHutDivisions(struct Node *rootNode){
     if(!rootNode->external){
         glBegin(GL_LINES);
@@ -205,8 +227,11 @@ int main(int argc, char *argv[]){
 	MPI_Comm_rank(MPI_COMM_WORLD,&rank);
 	MPI_Comm_size(MPI_COMM_WORLD,&worldSize);
 
+	//nOriginal will hold the initial value of particles (some might exit the calculation area)
 	int nOriginal=500;
+	//nShared are the real number of particles that are being calculated
     int nShared=500;
+	//Total steps for the calculation (ignored in live view)
 	int steps=100;
 
 	if(argc>1){
@@ -219,14 +244,20 @@ int main(int argc, char *argv[]){
     int nLocal=ceil(((float) nShared)/worldSize);
 	int nLocalMax=nLocal;
 	nOriginal=nShared;
+	//If the number of particles is not evenly divisible by the number of procs
 	if(rank==(worldSize-1)){
 		nLocal=nShared-(worldSize-1)*nLocal;
 	}
 	int nLocalOriginal=nLocal;
 
+	//Buffer to hold position in x and y, and mass.
+	//First entrance holds the number of particles per core
     double *sharedBuff = (double *) malloc(sizeof(double)*(3*nShared+1));
+	//Buffer to receive data from MPI
     double *receiveBuff = (double *) malloc(sizeof(double)*(3*nLocalMax+1));
-    double *localBuff = (double *) malloc(sizeof(double)*(4*nLocal));
+    //Buffer to hold velocity and acceleration in x and y directions
+	double *localBuff = (double *) malloc(sizeof(double)*(4*nLocal));
+	//For OpenGL, radius of the particles (constant density ~ sqrt(Mass))
     double *radius = (double *) malloc(sizeof(double)*(nShared));
 
 	//Rand need to work different per proc
